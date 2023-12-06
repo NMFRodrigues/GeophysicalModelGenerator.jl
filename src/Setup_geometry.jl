@@ -1,16 +1,17 @@
 using Base: Int64, Float64, NamedTuple
 using Printf
 using Parameters        # helps setting default parameters in structures
-using SpecialFunctions: erfc  
+using SpecialFunctions: erfc, erfinv
+using GeometricalPredicates
 
 # Setup_geometry
 # 
 # These are routines that help to create input geometries, such as slabs with a given angle
 #
 
-export  AddBox!, AddSphere!, AddEllipsoid!, AddCylinder!,
+export  AddBox!, AddSphere!, AddEllipsoid!, AddCylinder!, AddSubductingTip!, AddPassiveTracers!, AddPolygon!,
         makeVolcTopo,
-        ConstantTemp, LinearTemp, HalfspaceCoolingTemp, SpreadingRateTemp,
+        ConstantTemp, LinearTemp, HalfspaceCoolingTemp, SubductingTipTemp, SpreadingRateTemp,
         ConstantPhase, LithosphericPhases, 
         Compute_ThermalStructure, Compute_Phase
 
@@ -73,12 +74,14 @@ julia> Write_Paraview(Model3D,"LaMEM_ModelSetup")           # Save model to para
  "LaMEM_ModelSetup.vts"   
 ```
 """
+
+
 function AddBox!(Phase, Temp, Grid::AbstractGeneralGrid;                 # required input
-                xlim=Tuple{2}, ylim=nothing, zlim=Tuple{2},     # limits of the box
-                Origin=nothing, StrikeAngle=0, DipAngle=0,      # origin & dip/strike
-                phase = ConstantPhase(1),                       # Sets the phase number(s) in the box
-                T=nothing )                                     # Sets the thermal structure (various fucntions are available)
-    
+        xlim=Tuple{2}, ylim=nothing, zlim=Tuple{2},     # limits of the box
+        Origin=nothing, StrikeAngle=0, DipAngle=0,      # origin & dip/strike
+        phase = ConstantPhase(1),                       # Sets the phase number(s) in the box
+        T=nothing )                                     # Sets the thermal structure (various fucntions are available)
+
     # Retrieve 3D data arrays for the grid
     X,Y,Z = coordinate_grids(Grid)
 
@@ -86,7 +89,7 @@ function AddBox!(Phase, Temp, Grid::AbstractGeneralGrid;                 # requi
     if ylim==nothing 
         ylim = (minimum(Y), maximum(Y)) 
     end
-    
+
     if Origin==nothing 
         Origin = (xlim[1], ylim[1], zlim[2])  # upper-left corner
     end
@@ -103,9 +106,9 @@ function AddBox!(Phase, Temp, Grid::AbstractGeneralGrid;                 # requi
     ztop = zlim[2] - Origin[3]
     zbot = zlim[1] - Origin[3]
     ind = findall(  (Xrot .>= (xlim[1] - Origin[1])) .& (Xrot .<= (xlim[2] - Origin[1])) .&  
-                    (Yrot .>= (ylim[1] - Origin[2])) .& (Yrot .<= (ylim[2] - Origin[2])) .&  
-                    (Zrot .>= zbot) .& (Zrot .<= ztop)  )
-    
+            (Yrot .>= (ylim[1] - Origin[2])) .& (Yrot .<= (ylim[2] - Origin[2])) .&  
+            (Zrot .>= zbot) .& (Zrot .<= ztop)  )
+
 
     # Compute thermal structure accordingly. See routines below for different options
     if T != nothing
@@ -114,9 +117,10 @@ function AddBox!(Phase, Temp, Grid::AbstractGeneralGrid;                 # requi
 
     # Set the phase. Different routines are available for that - see below.
     Phase[ind] = Compute_Phase(Phase[ind], Temp[ind], Xrot[ind], Yrot[ind], Zrot[ind], phase)
-    
+
     return nothing
 end
+
 
 """
     AddSphere!(Phase, Temp, Grid::AbstractGeneralGrid; cen=Tuple{3}, radius=Tuple{1},
@@ -365,6 +369,332 @@ function Rot3D!(X,Y,Z, StrikeAngle, DipAngle)
     return nothing
 end
 
+
+"""
+    AddSubductingTip!(Phase, Temp, Grid::AbstractGeneralGrid; xlim=Tuple{2}, [ylim=Tuple{2}], zlim=Tuple{2},
+            Origin=nothing, StrikeAngle=0, DipAngle=0, step=nothing
+            phase = ConstantPhase(1),
+            T=nothing )
+
+Adds a Subducting slab with phase & temperature structure to a 3D model setup.
+
+
+Parameters
+====
+- Phase - Phase array (consistent with Grid)
+- Temp  - Temperature array (consistent with Grid)
+- Grid -  grid structure (usually obtained with ReadLaMEM_InputFile, but can also be other grid types)
+- xlim -  left/right coordinates of box
+- ylim -  front/back coordinates of box [optional; if not specified we use the whole box]
+- zlim -  bottom/top coordinates of box
+- Origin - the origin, used to rotate the box around. Default is the left-front-top corner
+- StrikeAngle - strike angle of slab
+- DipAngle - dip angle of slab
+- step - number of times the slab is subdivided with incremental dip angles
+- phase - specifies the phase of the box. See `ConstantPhase()`,`LithosphericPhases()` 
+- T - specifies the temperature of the box. See `ConstantTemp()`,`LinearTemp()`,`HalfspaceCoolingTemp()`,`SpreadingRateTemp()` 
+
+"""
+
+function AddSubductingTip!(Phase, Temp, Grid::AbstractGeneralGrid;                      # required input
+    xlim=Tuple{}, ylim=nothing, zlim=Tuple{},                                         # limits of the box
+    Origin=nothing, StrikeAngle=0, DipAngle=0, step=nothing,                                         # origin & dip/strike
+    phase = ConstantPhase(1),                                                           # Sets the phase number(s) in the box
+    T=nothing )                                                                         # Sets the thermal structure (various fucntions are available)
+
+    # Retrieve 3D data arrays for the grid
+    X,Y,Z = coordinate_grids(Grid)
+
+    # Limits of block                
+    if ylim==nothing 
+        ylim = (minimum(Y), maximum(Y)) 
+    end
+
+    if Origin==nothing 
+        Origin = (xlim[1], ylim[1], zlim[2])  # upper-left corner
+    end 
+
+    # Unpack values to calculate LAB depth
+    if T !=nothing
+        @unpack Tsurface, Tbottom, Tmantle, Age = T
+    end
+
+    # Pull LAB value
+    Zlab = Compute_LAB(Tsurface, Tbottom, Tmantle, Age)
+   
+
+    if step==nothing 
+
+        if Origin==nothing 
+            Origin = (xlim[1], ylim[1], zlim[2])  # upper-left corner
+        end 
+
+        SubDip = DipAngle
+
+        # Perform rotation of 3D coordinates:
+        Xrot = X .- Origin[1];
+        Yrot = Y .- Origin[2];
+        Zrot = Z .- Origin[3];
+
+        Rot3D!(Xrot,Yrot,Zrot, StrikeAngle, SubDip)
+
+        # Set phase number & thermal structure in the full domain
+        ztop = zlim[2] - Origin[3]
+        zbot = -Zlab - Origin[3]
+        ind = findall(  (Xrot .>= (xlim[1] - Origin[1])) .& (Xrot .<= (xlim[2] - Origin[1])) .&  
+                        (Yrot .>= (ylim[1] - Origin[2])) .& (Yrot .<= (ylim[2] - Origin[2])) .&  
+                        (Zrot .>= zbot) .& (Zrot .<= ztop)  )
+
+        # Compute thermal structure accordingly. See routines below for different options
+        if T != nothing
+            Temp[ind] = Compute_ThermalStructure(Temp[ind], Xrot[ind], Yrot[ind], Zrot[ind], T)
+        end
+
+        # Set the phase. Different routines are available for that - see below.
+        Phase[ind] = Compute_Phase(Phase[ind], Temp[ind], Xrot[ind], Yrot[ind], Zrot[ind], phase)
+    end
+    
+
+    if step!=nothing 
+       
+        xcoord = zeros(Float64, size(1:1:step))
+        SubDip = zeros(Float64, size(1:1:step))
+        new_ztop = zeros(Float64, size(1:1:step))
+        len_sub = (xlim[2] - xlim[1]) / step
+
+        for i in 1:1:step
+            if i == 1
+
+                SubDip[1] = DipAngle / step
+                new_ztop[1] = zlim[2]
+                xcoord[i] = xlim[1] + (cos(deg2rad(SubDip[1])) * len_sub)
+
+
+                ##############################################################################################################################
+                ############################################ Defining Background Temps and Phases ############################################
+                ##############################################################################################################################
+
+
+
+                # Set phase number & thermal structure in the full domain
+                ind = findall(  (X .>= (xlim[1])) .& (X .<= (xcoord[i])) .&  
+                                (Y .>= (ylim[1])) .& (Y .<= (ylim[2])) .&  
+                                (Z .>= zlim[1]) .& (Z .<= (-Zlab))  )
+
+                if T != nothing
+                    Temp[ind] = Compute_ThermalStructure(Temp[ind], X[ind], Y[ind], Z[ind], T)
+                end
+
+                # Set the phase. Different routines are available for that - see below.
+                Phase[ind] = Compute_Phase(Phase[ind], Temp[ind], X[ind], Y[ind], Z[ind], phase)
+
+
+
+                ##############################################################################################################################
+                ############################################### Defining Slab Temps and Phases ###############################################
+                ##############################################################################################################################
+
+
+
+                if Origin==nothing 
+                    Origin = (xlim[1], ylim[1], zlim[2])  # upper-left corner
+                end 
+    
+                # Perform rotation of 3D coordinates:
+                Xrot = X .- Origin[1];
+                Yrot = Y .- Origin[2];
+                Zrot = Z .- Origin[3];
+    
+                Rot3D!(Xrot,Yrot,Zrot, StrikeAngle, SubDip[i])
+    
+                # Set phase number & thermal structure in the full domain
+                ind_ = findall( (Xrot .>= (xlim[1] - Origin[1])) .& (Xrot .<= ((xcoord[i] + (tan(deg2rad(SubDip[1]))*Zlab)) - Origin[1])) .&  
+                                (Yrot .>= (ylim[1] - Origin[2])) .& (Yrot .<= (ylim[2] - Origin[2])) .&  
+                                (Zrot .>= (-Zlab - Origin[3])) .& (Zrot .<= (zlim[2] - Origin[3]))  )
+
+                # Compute thermal structure accordingly. See routines below for different options
+                if T != nothing
+                    Temp[ind_] = Compute_ThermalStructure(Temp[ind_], Xrot[ind_], Yrot[ind_], Zrot[ind_], T)
+                end
+
+                # Set the phase. Different routines are available for that - see below.
+                Phase[ind_] = Compute_Phase(Phase[ind_], Temp[ind_], Xrot[ind_], Yrot[ind_], Zrot[ind_], phase)
+
+            else
+
+                SubDip[i] = SubDip[i-1] + (DipAngle / step)
+                xcoord[i] = xcoord[i-1] + (cos(deg2rad(SubDip[i-1])) * len_sub)
+                new_ztop[i] = new_ztop[i-1] - (sin(deg2rad(SubDip[i-1])) * len_sub) 
+                new_Zlab = new_ztop[i] - Zlab
+
+
+                ##############################################################################################################################
+                ############################################ Defining Background Temps and Phases ############################################
+                ##############################################################################################################################
+
+
+
+                # Set phase number & thermal structure in the full domain
+                ind = findall(  (X .>= (xcoord[i-1])) .& (X .<= (xcoord[i])) .&  
+                                (Y .>= (ylim[1])) .& (Y .<= (ylim[2])) .&  
+                                (Z .>= zlim[1]) .& (Z .<= (new_Zlab))  )
+
+
+                if T != nothing
+                    Temp[ind] = Compute_ThermalStructure(Temp[ind], X[ind], Y[ind], Z[ind], T)
+                end
+
+                # Set the phase. Different routines are available for that - see below.
+                Phase[ind] = Compute_Phase(Phase[ind], Temp[ind], X[ind], Y[ind], Z[ind], phase)
+
+                
+                
+                ##############################################################################################################################
+                ############################################### Defining Slab Temps and Phases ###############################################
+                ##############################################################################################################################
+
+                Origin = (xcoord[i-1], ylim[1], new_ztop[i])  # upper-left corner
+            
+                # Perform rotation of 3D coordinates:
+                Xrot = X .- Origin[1];
+                Yrot = Y .- Origin[2];
+                Zrot = Z .- Origin[3];
+    
+                Rot3D!(Xrot,Yrot,Zrot, StrikeAngle, SubDip[i])
+    
+                # Set phase number & thermal structure in the full domain
+                ind_ = findall( (Xrot .>= (xcoord[i-1] - Origin[1])) .& (Xrot .<= ((xcoord[i] + (tan(deg2rad(SubDip[i-1]))*Zlab)) - Origin[1])) .&  
+                                (Yrot .>= (ylim[1] - Origin[2])) .& (Yrot .<= (ylim[2] - Origin[2])) .&  
+                                (Zrot .>= (new_Zlab - Origin[3])) .& (Zrot .<= (new_ztop[i] - Origin[3]))  )
+
+                # Compute thermal structure accordingly. See routines below for different options
+                if T != nothing
+                    Temp[ind_] = Compute_ThermalStructure(Temp[ind_], Xrot[ind_], Yrot[ind_], Zrot[ind_], T)
+                end
+
+                # Set the phase. Different routines are available for that - see below.
+                Phase[ind_] = Compute_Phase(Phase[ind_], Temp[ind_], Xrot[ind_], Yrot[ind_], Zrot[ind_], phase)
+            end
+        end 
+    end
+    return nothing
+end
+
+"""
+    AddSubductingTip!(Phase, Temp, Grid::AbstractGeneralGrid; xlim=Tuple{2}, [ylim=Tuple{2}], zlim=Tuple{2},
+            Origin=nothing, StrikeAngle=0, DipAngle=0, step=nothing
+            phase = ConstantPhase(1),
+            T=nothing )
+
+Adds a Subducting slab with phase & temperature structure to a 3D model setup.
+
+
+Parameters
+====
+- Phase - Phase array (consistent with Grid)
+- Grid -  grid structure (usually obtained with ReadLaMEM_InputFile, but can also be other grid types)
+- xlim -  left/right coordinates of box
+- ylim -  front/back coordinates of box [optional; if not specified we use the whole box]
+- zlim -  bottom/top coordinates of box
+- Origin - the origin, used to rotate the box around. Default is the left-front-top corner
+- StrikeAngle - strike angle of slab
+- DipAngle - dip angle of slab
+- Width - dimension of the passive tracers
+- Step - distance between passive tracers
+- phase - specifies the phase of the box. See `ConstantPhase()`,`LithosphericPhases()` 
+- NewPhase - replaces the existing phase with a new one 
+
+"""
+
+function AddPassiveTracers!(Phase, Grid::AbstractGeneralGrid;
+                            xlim=Tuple{2}, ylim=nothing, zlim=Tuple{2}, 
+                            Origin=nothing, StrikeAngle=0, DipAngle=0, 
+                            Width=Tuple{1}, Step=Tuple{1}, 
+                            phase=Tuple{1}, 
+                            NewPhase=Tuple{1})
+    
+    # Retrieve 3D data arrays for the grid
+    X,Y,Z = coordinate_grids(Grid)
+    
+    # Limits of block                
+    if ylim==nothing 
+        ylim = (minimum(Y), maximum(Y)) 
+    end
+
+    if Origin==nothing 
+        Origin = (xlim[1], ylim[1], zlim[2])  # upper-left corner
+    end
+
+    # Perform rotation of 3D coordinates:
+    Xrot = X .- Origin[1];
+    Yrot = Y .- Origin[2];
+    Zrot = Z .- Origin[3];
+
+    for z_cen in minimum(Zrot):Step:maximum(Zrot)
+        ind = findall( (Zrot .< (z_cen + Width/2)) .& (Zrot .> (z_cen .- Width/2)))
+        id = findall(Phase[ind] .== phase)  
+        if !isempty(id)
+            Phase[ind[id]] .= NewPhase
+        end
+    end
+
+    Rot3D!(Xrot,Yrot,Zrot, StrikeAngle, DipAngle)
+    
+    return nothing
+end
+
+
+function AddPolygon!(   Phase, Temp, Grid::AbstractGeneralGrid;                 # required input
+                        PolyPoints=nothing,                                     # limits of the Box     
+                        phase = ConstantPhase(1),                               # Sets the phase number(s) in the box
+                        T=nothing )                                             # Sets the thermal structure (various fucntions are available)
+
+    # Retrieve 3D data arrays for the grid
+    X,Y,Z = coordinate_grids(Grid)
+
+    # # Limits of block                
+    # if ylim==nothing 
+    #     ylim = (minimum(Y), maximum(Y)) 
+    # end
+
+    # if Origin==nothing 
+    #     Origin = (xlim[1], ylim[1], zlim[2])  # upper-left corner
+    # end
+
+    # # Perform rotation of 3D coordinates:
+    # Xrot = X .- Origin[1];
+    # Yrot = Y .- Origin[2];
+    # Zrot = Z .- Origin[3];
+
+    # Rot3D!(Xrot,Yrot,Zrot, StrikeAngle, DipAngle)
+
+
+    # # Set phase number & thermal structure in the full domain
+    # ztop = zlim[2] - Origin[3]
+    # zbot = zlim[1] - Origin[3]
+    # ind = findall(  (Xrot .>= (xlim[1] - Origin[1])) .& (Xrot .<= (xlim[2] - Origin[1])) .&  
+    #                 (Yrot .>= (ylim[1] - Origin[2])) .& (Yrot .<= (ylim[2] - Origin[2])) .&  
+    #                 (Zrot .>= zbot) .& (Zrot .<= ztop)  )
+    
+    
+
+    ind = findall(  (X .== Polygon(PolyPoints)) .&  
+                    (Y .== Polygon(PolyPoints)) .&  
+                    (Z .== Polygon(PolyPoints)) )
+
+
+    # Compute thermal structure accordingly. See routines below for different options
+    if T != nothing
+        Temp[ind] = Compute_ThermalStructure(Temp[ind], X[ind], Y[ind], Z[ind], T)
+    end
+
+    # Set the phase. Different routines are available for that - see below.
+    Phase[ind] = Compute_Phase(Phase[ind], Temp[ind], X[ind], Y[ind], Z[ind], phase)
+
+    return nothing
+end
+
+
 """
 makeVolcTopo(Grid::LaMEM_grid; center::Array{Float64, 1}, height::Float64, radius::Float64, crater::Float64,
             base=0.0m, background=nothing)
@@ -532,34 +862,58 @@ Sets a halfspace temperature structure in plate
 Parameters
 ========
 - Tsurface : surface temperature [C]
+- Tbottom : upper/lower mantle temperature [C]
 - Tmantle : mantle temperature [C]
 - Age : Thermal Age of plate [Myrs]
 - Adiabat : Mantle Adiabat [K/km]
 
 """
+
+
+# Function needed to limit the rotation on AddSubductingTip!
+function Compute_LAB(Tsurface, Tbottom, Tmantle, Age)
+
+    kappa       =   1e-6;
+    SecYear     =   3600*24*365
+    ThermalAge  =   Age*1e6*SecYear;
+
+    Zlab = (2 * erfinv((Tmantle - Tsurface) / (Tbottom - Tsurface)) * sqrt(kappa * ThermalAge)) / 1e3   
+    return Zlab
+end
+
+
+
+# Asthenosphere thermal gradient is defined inside the function
+# Half space cooling defined with the temperature of the Upper/Lower mantle
 @with_kw_noshow mutable struct HalfspaceCoolingTemp <: AbstractThermalStructure
     Tsurface = 0       # top T
-    Tmantle = 1350     # bottom T
+    Tbottom = 1565     # bottom T
+    Tmantle = 1350     # mantle T
     Age  = 60          # thermal age of plate [in Myrs]
     Adiabat = 0        # Adiabatic gradient in K/km
 end
 
 function Compute_ThermalStructure(Temp, X, Y, Z, s::HalfspaceCoolingTemp)
-    @unpack Tsurface, Tmantle, Age, Adiabat  = s
+    @unpack Tsurface, Tbottom, Tmantle, Age, Adiabat  = s
 
     kappa       =   1e-6;
-    SecYear     =   3600*24*365
-    dz          =   Z[end]-Z[1];
+    SecYear     =   3600*24*365;
     ThermalAge  =   Age*1e6*SecYear;
 
-    MantleAdiabaticT    =   Tmantle .+ Adiabat*abs.(Z);   # Adiabatic temperature of mantle
-    
+    Zlab = (2 * erfinv((Tmantle - Tsurface) / (Tbottom - Tsurface)) * sqrt(kappa * ThermalAge)) / 1e3                                       # Depth of LAB
+    Adiabat = (Tbottom - Tmantle) / (abs(Z[1]) - Zlab)                                                                                      # Adjust the gradient for different lithosphere thicknesses
+    MantleAdiabaticT    =   Tmantle .+ Adiabat*(abs.(Z) .- Zlab)                                                                            # Thermal gradient
+
+    # Half space cooling for the lithosphere and the linear thermal gradient for the asthenosphere
+                                                                            
     for i in eachindex(Temp)
-        Temp[i] =   (Tsurface .- Tmantle)*erfc((abs.(Z[i])*1e3)./(2*sqrt(kappa*ThermalAge))) + MantleAdiabaticT[i];
+        Temp[i] = Tbottom + (Tsurface .- Tbottom)*erfc((abs.(Z[i])*1e3)./(2*sqrt(kappa*ThermalAge)))                                        # Using upper/lower mantle T instead of LAB T
+        if Temp[i] > Tmantle
+            Temp[i] = MantleAdiabaticT[i]                                            
+        end
     end
     return Temp
 end
-
 
 """
     SpreadingRateTemp(Tsurface=0, Tmantle=1350, Adiabat=0, MORside="left",SpreadingVel=3, AgeRidge=0, maxAge=80)
@@ -569,6 +923,7 @@ Sets a halfspace temperature structure within the box, combined with a spreading
 Parameters
 ========
 - Tsurface : surface temperature [C]
+- Tbottom : upper/lower mantle temperature [C]
 - Tmantle : mantle temperature [C]
 - Adiabat : Mantle Adiabat [K/km]
 - MORside : side of the box where the MOR is located ["left","right","front","back"]
@@ -577,9 +932,13 @@ Parameters
 - maxAge : maximum thermal Age of plate [Myrs]
 
 """
+
+# Asthenosphere thermal gradient is defined inside the function
+# Half space cooling defined with the temperature of the Upper/Lower mantle
 @with_kw_noshow mutable struct SpreadingRateTemp <: AbstractThermalStructure
     Tsurface = 0       # top T
-    Tmantle = 1350     # bottom T
+    Tbottom = 1565     # bottom T
+    Tmantle = 1350     # mantle T
     Adiabat = 0        # Adiabatic gradient in K/km
     MORside = "left"   # side of box where the MOR is located
     SpreadingVel = 3   # spreading velocity [cm/yr]
@@ -588,15 +947,12 @@ Parameters
 end
 
 function Compute_ThermalStructure(Temp, X, Y, Z, s::SpreadingRateTemp)
-    @unpack Tsurface, Tmantle, Adiabat, MORside, SpreadingVel, AgeRidge, maxAge  = s
+    @unpack Tsurface, Tbottom, Tmantle, Adiabat, MORside, SpreadingVel, AgeRidge, maxAge  = s
 
     kappa       =   1e-6;
     SecYear     =   3600*24*365
     dz          =   Z[end]-Z[1];
   
-
-    MantleAdiabaticT    =   Tmantle .+ Adiabat*abs.(Z);   # Adiabatic temperature of mantle
-    
     if MORside=="left"
         Distance = X .- X[1,1,1]; 
     elseif MORside=="right"
@@ -608,16 +964,25 @@ function Compute_ThermalStructure(Temp, X, Y, Z, s::SpreadingRateTemp)
     else
         error("unknown side")
     end
-    
+
     for i in eachindex(Temp)
-        ThermalAge    =   abs(Distance[i]*1e3*1e2)/SpreadingVel + AgeRidge*1e6;   # Thermal age in years
+        ThermalAge    =   abs(Distance[i]*1e3*1e2)/SpreadingVel + AgeRidge*1e6;                                       # Thermal age in years
         if ThermalAge>maxAge*1e6
-            ThermalAge = maxAge*1e6
+             ThermalAge = maxAge*1e6;
         end
         
         ThermalAge    =   ThermalAge*SecYear;
 
-        Temp[i] = (Tsurface .- Tmantle)*erfc((abs.(Z[i])*1e3)./(2*sqrt(kappa*ThermalAge))) + MantleAdiabaticT[i];
+        Zlab = (2 * erfinv((Tmantle - Tsurface) / (Tbottom - Tsurface)) * sqrt(kappa * ThermalAge)) / 1e3;            # Depth of LAB
+        Adiabat = (Tbottom - Tmantle) / (abs(Z[1]) - Zlab);                                                           # Gradient   
+
+        Temp[i] = Tbottom + (Tsurface .- Tbottom)*erfc((abs.(Z[i])*1e3)./(2*sqrt(kappa*ThermalAge)));                 # Using bottom T instead of LAB T
+        
+        if Temp[i] > Tmantle
+            
+            Temp[i] = Tmantle .+ Adiabat*(abs.(Z[i]) .- Zlab);    
+
+        end
     end
     return Temp
 end
