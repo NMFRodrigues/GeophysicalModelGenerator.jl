@@ -2,7 +2,7 @@ using Base: Int64, Float64, NamedTuple
 using Printf
 using Parameters        # helps setting default parameters in structures
 using SpecialFunctions: erfc, erfinv
-using GeometricalPredicates
+using PolygonOps
 
 # Setup_geometry
 # 
@@ -11,7 +11,7 @@ using GeometricalPredicates
 
 export  AddBox!, AddSphere!, AddEllipsoid!, AddCylinder!, AddSubductingTip!, AddPassiveTracers!, AddPolygon!,
         makeVolcTopo,
-        ConstantTemp, LinearTemp, HalfspaceCoolingTemp, SubductingTipTemp, SpreadingRateTemp,
+        ConstantTemp, LinearTemp, HalfspaceCoolingTemp, SpreadingRateTemp,
         ConstantPhase, LithosphericPhases, 
         Compute_ThermalStructure, Compute_Phase
 
@@ -601,7 +601,7 @@ Parameters
 - DipAngle - dip angle of slab
 - Width - dimension of the passive tracers
 - Step - distance between passive tracers
-- phase - specifies the phase of the box. See `ConstantPhase()`,`LithosphericPhases()` 
+- phase - specifies the preexisting phase of the box.
 - NewPhase - replaces the existing phase with a new one 
 
 """
@@ -644,43 +644,21 @@ function AddPassiveTracers!(Phase, Grid::AbstractGeneralGrid;
 end
 
 
-function AddPolygon!(   Phase, Temp, Grid::AbstractGeneralGrid;                 # required input
-                        PolyPoints=nothing,                                     # limits of the Box     
-                        phase = ConstantPhase(1),                               # Sets the phase number(s) in the box
-                        T=nothing )                                             # Sets the thermal structure (various fucntions are available)
+function AddPolygon!(Phase, Temp, Grid::AbstractGeneralGrid;                 # required input
+                     Poly=Tuple{},                                           # limits of the Box     
+                     phase = ConstantPhase(1),                               # Sets the phase number(s) in the box
+                     T=nothing )                                             # Sets the thermal structure (various fucntions are available)
 
     # Retrieve 3D data arrays for the grid
     X,Y,Z = coordinate_grids(Grid)
-
-    # # Limits of block                
-    # if ylim==nothing 
-    #     ylim = (minimum(Y), maximum(Y)) 
-    # end
-
-    # if Origin==nothing 
-    #     Origin = (xlim[1], ylim[1], zlim[2])  # upper-left corner
-    # end
-
-    # # Perform rotation of 3D coordinates:
-    # Xrot = X .- Origin[1];
-    # Yrot = Y .- Origin[2];
-    # Zrot = Z .- Origin[3];
-
-    # Rot3D!(Xrot,Yrot,Zrot, StrikeAngle, DipAngle)
-
-
-    # # Set phase number & thermal structure in the full domain
-    # ztop = zlim[2] - Origin[3]
-    # zbot = zlim[1] - Origin[3]
-    # ind = findall(  (Xrot .>= (xlim[1] - Origin[1])) .& (Xrot .<= (xlim[2] - Origin[1])) .&  
-    #                 (Yrot .>= (ylim[1] - Origin[2])) .& (Yrot .<= (ylim[2] - Origin[2])) .&  
-    #                 (Zrot .>= zbot) .& (Zrot .<= ztop)  )
     
-    
+    in_X = inpolygon(X, Poly)
+    in_Y = inpolygon(Y, Poly)
+    in_Z = inpolygon(Z, Poly)
 
-    ind = findall(  (X .== Polygon(PolyPoints)) .&  
-                    (Y .== Polygon(PolyPoints)) .&  
-                    (Z .== Polygon(PolyPoints)) )
+    ind = findall(  (in_X .== 1) .&  
+                    (in_Y .== 1) .&  
+                    (in_Z .== 1) )
 
 
     # Compute thermal structure accordingly. See routines below for different options
@@ -901,8 +879,14 @@ function Compute_ThermalStructure(Temp, X, Y, Z, s::HalfspaceCoolingTemp)
     ThermalAge  =   Age*1e6*SecYear;
 
     Zlab = (2 * erfinv((Tmantle - Tsurface) / (Tbottom - Tsurface)) * sqrt(kappa * ThermalAge)) / 1e3                                       # Depth of LAB
-    Adiabat = (Tbottom - Tmantle) / (abs(Z[1]) - Zlab)                                                                                      # Adjust the gradient for different lithosphere thicknesses
-    MantleAdiabaticT    =   Tmantle .+ Adiabat*(abs.(Z) .- Zlab)                                                                            # Thermal gradient
+    
+    if Adiabat==nothing
+        Gradient = (Tbottom - Tmantle) / (abs.(Z[1]) - Zlab)                                                                                      # Adjust the gradient for different lithosphere thicknesses
+    elseif Adiabat!=nothing
+        Gradient = Adiabat 
+    end
+    
+    MantleAdiabaticT    =   Tmantle .+ Gradient*(abs.(Z) .- Zlab)                                                                            # Thermal gradient
 
     # Half space cooling for the lithosphere and the linear thermal gradient for the asthenosphere
                                                                             
@@ -974,13 +958,18 @@ function Compute_ThermalStructure(Temp, X, Y, Z, s::SpreadingRateTemp)
         ThermalAge    =   ThermalAge*SecYear;
 
         Zlab = (2 * erfinv((Tmantle - Tsurface) / (Tbottom - Tsurface)) * sqrt(kappa * ThermalAge)) / 1e3;            # Depth of LAB
-        Adiabat = (Tbottom - Tmantle) / (abs(Z[1]) - Zlab);                                                           # Gradient   
+
+        if Adiabat==nothing
+            Gradient = (Tbottom - Tmantle) / (abs.(Z[1]) - Zlab)                                                                                      # Adjust the gradient for different lithosphere thicknesses
+        elseif Adiabat!=nothing
+            Gradient = Adiabat 
+        end                                                                
 
         Temp[i] = Tbottom + (Tsurface .- Tbottom)*erfc((abs.(Z[i])*1e3)./(2*sqrt(kappa*ThermalAge)));                 # Using bottom T instead of LAB T
         
         if Temp[i] > Tmantle
             
-            Temp[i] = Tmantle .+ Adiabat*(abs.(Z[i]) .- Zlab);    
+            Temp[i] = Tmantle .+ Gradient*(abs.(Z[i]) .- Zlab);    
 
         end
     end
